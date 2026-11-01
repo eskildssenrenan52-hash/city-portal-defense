@@ -36,6 +36,8 @@ import { bossHp, bossMeleeDamage, bossPhaseCooldown, bossPhaseForHp, bossPhaseSp
 import { CITADEL_BOSS_LOOK, CITADEL_DOOR, CITADEL_FINAL_BOSS_ID, citadelUnlocked, drawCitadelKing } from "./demon-citadel";
 import { BEASTS, beastKey } from "./bestiary";
 import { drawBeast } from "./beast-art";
+import { siegeTick, siegeMarch, siegeOnKill, drawSiegeHud, type SiegeRun } from "./siege-play";
+import { SIEGE_BOSS_LOOK } from "./siege";
 import { carveEntrances, depthAction, surfaceEntrance, drawSurfaceEntrances, drawDepth, depthLights, depthDarkness, leaveDepth, enterCitadel, restartTutorialFloor, TUTORIAL_BOSS_ID, TUTORIAL_BOSS_LOOK, type DepthState } from "./depthplay";
 import { BOAT_RECIPES } from "./archipelago";
 import { archipelagoInteract, archipelagoPrompt, archipelagoArea, onBoatCraft, updateSea, renderSea, islandTick, islandOnKill, leaveArchipelago, drawIslandProps, drawIslandAtmosphere, ISLAND_BOSS_RESPAWN_SECONDS, type SeaRun, type IslandRun } from "./sailing";
@@ -56,7 +58,7 @@ const LEGACY_BOSS_LOOK: Record<string, { kind: EnemyKind; tint: string; scale: n
   fenrir: { kind: "wolf", tint: "#b8e4ff", scale: 2.6 },
   crystal_golem: { kind: "golem", tint: "#b080ff", scale: 2.5 },
 };
-const BOSS_LOOK: Record<string, { kind: EnemyKind; tint: string; scale: number }> = { ...LEGACY_BOSS_LOOK, ...STORY_BOSS_LOOK, ...ABYSS_BOSS_LOOK, ...SAGA_BOSS_LOOK, ...TUTORIAL_BOSS_LOOK, ...CITADEL_BOSS_LOOK };
+const BOSS_LOOK: Record<string, { kind: EnemyKind; tint: string; scale: number }> = { ...LEGACY_BOSS_LOOK, ...STORY_BOSS_LOOK, ...ABYSS_BOSS_LOOK, ...SAGA_BOSS_LOOK, ...TUTORIAL_BOSS_LOOK, ...CITADEL_BOSS_LOOK, ...SIEGE_BOSS_LOOK };
 
 /** Cor de grading por bioma legado (os biomas de fronteira usam a própria cor-base). [r, g, b, alpha] */
 const GRADES: Partial<Record<Biome, [number, number, number, number]>> = {
@@ -119,6 +121,7 @@ export class Game {
   depth: DepthState | null = null;
   depthReturn = { x: 0, y: 0 };
   /** Primeira jornada guiada; saves antigos continuam diretamente na campanha. */
+  siege: SiegeRun | null = null;
   tutorialActive = false;
   tutorialFloor = 0;
   tutorialDone = false;
@@ -137,7 +140,7 @@ export class Game {
   openedChests = new Set<string>();
   transition = 0;
   doorCooldown = 0;
-  get areaName() { const ar = archipelagoArea(this); if (ar) return ar; const sp = sagaPosOf(this); if (sp) return `${sp.realm.name} · ${sp.zone.name}`; if (this.depth) return this.depth.kind === 'tutorial' ? `Treino de Aventureiro · Andar ${this.depth.floor}/3` : this.depth.kind === 'abyss' ? `Abismo do Cântico · Andar ${this.depth.floor}` : isRealm(this.depth.temple) ? `${this.depth.temple?.name} · Reino Oculto` : `${this.depth.temple?.name} · 2º andar`; return this.interior?.name ?? (Math.hypot(this.p.x / TS - 122, this.p.y / TS - 126) < 19 ? 'Vila de Potos' : BIOME_NAMES[this.biome]); }
+  get areaName() { const ar = archipelagoArea(this); if (ar) return ar; const sp = sagaPosOf(this); if (sp) return `${sp.realm.name} · ${sp.zone.name}`; if (this.siege) return `Cidade de Aurélia · Onda ${this.siege.wave}`; if (this.depth) return this.depth.kind === 'tutorial' ? `Treino de Aventureiro · Andar ${this.depth.floor}/3` : this.depth.kind === 'abyss' ? `Abismo do Cântico · Andar ${this.depth.floor}` : isRealm(this.depth.temple) ? `${this.depth.temple?.name} · Reino Oculto` : `${this.depth.temple?.name} · 2º andar`; return this.interior?.name ?? (Math.hypot(this.p.x / TS - 122, this.p.y / TS - 126) < 19 ? 'Vila de Potos' : BIOME_NAMES[this.biome]); }
   get localNpcs(): NpcDef[] {
     if (this.depth || this.island || this.sea) return [];
     if (!this.interior) return NPCS;
@@ -461,6 +464,7 @@ export class Game {
     epicOnKill(this);
     petOnKill(this, e);
     if (!twinPartnerAlive) islandOnKill(this, e);
+    siegeOnKill(this, e);
     if (!e.boss && !this.island) sagaOnKill(this);
     const earned = Math.max(1, Math.round(e.xp * xpModifier(this.p.level, e.level) * luckMult(this)));
     this.gainXp(earned);
@@ -1084,6 +1088,7 @@ export class Game {
     this.time = (this.time + dt / 480) % 1;
     if (this.sea) { updateSea(this, dt); this.updateFx(dt); return; }
     if (this.island) islandTick(this, dt);
+    if (this.siege) siegeTick(this, dt);
     const p = this.p;
     const w = this.world;
 
@@ -1206,12 +1211,13 @@ export class Game {
         continue;
       }
       const dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy);
-      if (d > 420 && !e.boss?.active) continue;
+      if (d > 420 && !e.boss?.active && !this.siege) continue;
       e.t += dt;
       e.cd -= dt; e.hurt -= dt; e.slow -= dt;
       const spdMul = e.slow > 0 ? 0.4 : 1;
       // knockback
       if (Math.abs(e.kbx) + Math.abs(e.kby) > 1) { this.moveBody(e, e.kbx * dt, e.kby * dt); e.kbx *= Math.exp(-10*dt); e.kby *= Math.exp(-10*dt); }
+      if (this.siege && siegeMarch(this, e, dt, d)) continue;
       if (e.boss) { this.updateBoss(e, dt, d, dx, dy); continue; }
       const def = ENEMIES[e.kind];
       const aggro = (def.ranged ? 110 : 90) * (night ? 1.3 : 1);
@@ -1601,6 +1607,7 @@ export class Game {
     c.setTransform(1, 0, 0, 1, 0, 0);
     if (!this.interior && !this.depth && !this.island) { this.renderWaypoint(c); this.renderMinimap(); }
     liveDrawScreen(this, c);
+    drawSiegeHud(this, c);
     if (!this.live && !this.bossCard) this.renderInteractionPrompt(c);
     if(this.transition>0){c.fillStyle=`rgba(13,24,25,${Math.min(1,this.transition*1.5)})`;c.fillRect(0,0,this.viewWidth,this.viewHeight);}
     if (p.dead > 0) { c.fillStyle = `rgba(0,0,0,${Math.min(0.8, (2.5 - p.dead))})`; c.fillRect(0, 0, this.viewWidth, this.viewHeight); }

@@ -5,7 +5,7 @@ const NEVER_RESPAWN = new Set(["tutorial_gatekeeper"]);
 
 /** -1 = não volta. Ilhas voltam rápido; todos os outros chefões voltam em 3 minutos. */
 export function bossRespawnSeconds(bossId: string): number {
-  if (NEVER_RESPAWN.has(bossId)) return -1;
+  if (NEVER_RESPAWN.has(bossId) || bossId.startsWith("siege_")) return -1;
   if (bossId.startsWith("isle_")) return ISLAND_BOSS_RESPAWN_SECONDS;
   return BOSS_RESPAWN_SECONDS;
 }
